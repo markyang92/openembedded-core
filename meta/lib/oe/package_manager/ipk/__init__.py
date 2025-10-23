@@ -353,39 +353,114 @@ class OpkgPM(OpkgDpkgPM):
         if not pkgs:
             return
 
-        cmd = "%s %s" % (self.opkg_cmd, self.opkg_args)
-        for exclude in (self.d.getVar("PACKAGE_EXCLUDE") or "").split():
-            cmd += " --add-exclude %s" % exclude
-        for bad_recommendation in (self.d.getVar("BAD_RECOMMENDATIONS") or "").split():
-            cmd += " --add-ignore-recommends %s" % bad_recommendation
-        if hard_depends_only:
-            cmd += " --no-install-recommends"
-        cmd += " install "
-        cmd += " ".join(pkgs)
+        # Python3 패키지와 일반 패키지 분리
+        python_pkgs = []
+        other_pkgs = []
+        for pkg in pkgs:
+            if pkg.startswith('python3'):
+                python_pkgs.append(pkg)
+            else:
+                other_pkgs.append(pkg)
 
-        os.environ['D'] = self.target_rootfs
-        os.environ['OFFLINE_ROOT'] = self.target_rootfs
-        os.environ['IPKG_OFFLINE_ROOT'] = self.target_rootfs
-        os.environ['OPKG_OFFLINE_ROOT'] = self.target_rootfs
-        os.environ['INTERCEPT_DIR'] = self.intercepts_dir
-        os.environ['NATIVE_ROOT'] = self.d.getVar('STAGING_DIR_NATIVE')
+        # 일반 패키지 설치 (기존 경로)
+        if other_pkgs:
+            cmd = "%s %s" % (self.opkg_cmd, self.opkg_args)
+            for exclude in (self.d.getVar("PACKAGE_EXCLUDE") or "").split():
+                cmd += " --add-exclude %s" % exclude
+            for bad_recommendation in (self.d.getVar("BAD_RECOMMENDATIONS") or "").split():
+                cmd += " --add-ignore-recommends %s" % bad_recommendation
+            if hard_depends_only:
+                cmd += " --no-install-recommends"
+            cmd += " install "
+            cmd += " ".join(other_pkgs)
 
-        try:
-            bb.note("Installing the following packages: %s" % ' '.join(pkgs))
-            bb.note(cmd)
-            output = subprocess.check_output(cmd.split(), stderr=subprocess.STDOUT).decode("utf-8")
-            bb.note(output)
-            failed_pkgs = []
-            for line in output.split('\n'):
-                if line.endswith("configuration required on target."):
-                    bb.warn(line)
-                    failed_pkgs.append(line.split(".")[0])
-            if failed_pkgs:
-                failed_postinsts_abort(failed_pkgs, self.d.expand("${T}/log.do_${BB_CURRENTTASK}"))
-        except subprocess.CalledProcessError as e:
-            (bb.fatal, bb.warn)[attempt_only]("Unable to install packages. "
-                                              "Command '%s' returned %d:\n%s" %
-                                              (cmd, e.returncode, e.output.decode("utf-8")))
+            os.environ['D'] = self.target_rootfs
+            os.environ['OFFLINE_ROOT'] = self.target_rootfs
+            os.environ['IPKG_OFFLINE_ROOT'] = self.target_rootfs
+            os.environ['OPKG_OFFLINE_ROOT'] = self.target_rootfs
+            os.environ['INTERCEPT_DIR'] = self.intercepts_dir
+            os.environ['NATIVE_ROOT'] = self.d.getVar('STAGING_DIR_NATIVE')
+
+            try:
+                bb.note("Installing the following packages: %s" % ' '.join(other_pkgs))
+                bb.note(cmd)
+                output = subprocess.check_output(cmd.split(), stderr=subprocess.STDOUT).decode("utf-8")
+                bb.note(output)
+                failed_pkgs = []
+                for line in output.split('\n'):
+                    if line.endswith("configuration required on target."):
+                        bb.warn(line)
+                        failed_pkgs.append(line.split(".")[0])
+                if failed_pkgs:
+                    failed_postinsts_abort(failed_pkgs, self.d.expand("${T}/log.do_${BB_CURRENTTASK}"))
+            except subprocess.CalledProcessError as e:
+                (bb.fatal, bb.warn)[attempt_only]("Unable to install packages. "
+                                                  "Command '%s' returned %d:\n%s" %
+                                                  (cmd, e.returncode, e.output.decode("utf-8")))
+
+        # Python3 패키지를 /test 경로에 설치
+        if python_pkgs:
+            # /test 디렉토리 생성
+            test_rootfs = os.path.join(self.target_rootfs, "test")
+            bb.utils.mkdirhier(test_rootfs)
+            bb.utils.mkdirhier(os.path.join(test_rootfs, "var/lib/opkg"))
+
+            # opkg update를 먼저 실행 (offline root에서도 패키지를 찾을 수 있도록)
+            python_opkg_args = self.opkg_args.replace("-o %s" % self.target_rootfs, "-o %s" % test_rootfs)
+
+            # update 명령 실행
+            update_cmd = "%s %s update" % (self.opkg_cmd, python_opkg_args)
+            try:
+                bb.note("Updating package index for /test")
+                subprocess.check_output(update_cmd.split(), stderr=subprocess.STDOUT).decode("utf-8")
+            except subprocess.CalledProcessError as e:
+                bb.note("Update failed (may be normal): %s" % e.output.decode("utf-8"))
+
+            cmd = "%s %s" % (self.opkg_cmd, python_opkg_args)
+            for exclude in (self.d.getVar("PACKAGE_EXCLUDE") or "").split():
+                if not exclude.startswith('python3'):  # python3 제외는 스킵
+                    cmd += " --add-exclude %s" % exclude
+            for bad_recommendation in (self.d.getVar("BAD_RECOMMENDATIONS") or "").split():
+                cmd += " --add-ignore-recommends %s" % bad_recommendation
+            if hard_depends_only:
+                cmd += " --no-install-recommends"
+            cmd += " install "
+            cmd += " ".join(python_pkgs)
+
+            os.environ['D'] = test_rootfs
+            os.environ['OFFLINE_ROOT'] = test_rootfs
+            os.environ['IPKG_OFFLINE_ROOT'] = test_rootfs
+            os.environ['OPKG_OFFLINE_ROOT'] = test_rootfs
+            os.environ['INTERCEPT_DIR'] = self.intercepts_dir
+            os.environ['NATIVE_ROOT'] = self.d.getVar('STAGING_DIR_NATIVE')
+
+            try:
+                bb.note("Installing Python3 packages to /test: %s" % ' '.join(python_pkgs))
+                bb.note("Command: %s" % cmd)
+                output = subprocess.check_output(cmd.split(), stderr=subprocess.STDOUT).decode("utf-8")
+                bb.note(output)
+
+                # 설치 확인
+                if os.path.exists(os.path.join(test_rootfs, "usr/bin/python3")):
+                    bb.note("Python3 successfully installed to /test/usr/bin/python3")
+
+                failed_pkgs = []
+                for line in output.split('\n'):
+                    if line.endswith("configuration required on target."):
+                        bb.warn(line)
+                        failed_pkgs.append(line.split(".")[0])
+                if failed_pkgs:
+                    failed_postinsts_abort(failed_pkgs, self.d.expand("${T}/log.do_${BB_CURRENTTASK}"))
+            except subprocess.CalledProcessError as e:
+                (bb.fatal, bb.warn)[attempt_only]("Unable to install Python3 packages to /test. "
+                                                  "Command '%s' returned %d:\n%s" %
+                                                  (cmd, e.returncode, e.output.decode("utf-8")))
+            finally:
+                # 환경 변수 원복
+                os.environ['D'] = self.target_rootfs
+                os.environ['OFFLINE_ROOT'] = self.target_rootfs
+                os.environ['IPKG_OFFLINE_ROOT'] = self.target_rootfs
+                os.environ['OPKG_OFFLINE_ROOT'] = self.target_rootfs
 
     def remove(self, pkgs, with_dependencies=True):
         if not pkgs:
