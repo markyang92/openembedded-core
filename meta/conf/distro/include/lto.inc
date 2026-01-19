@@ -49,3 +49,10 @@ SELECTED_OPTIMIZATION:append = "${@bb.utils.contains('DISTRO_FEATURES', 'lto', '
 TARGET_LDFLAGS:append:class-target = "${@bb.utils.contains('DISTRO_FEATURES', 'lto', ' ${LTO}', '', d)}"
 
 SELECTED_OPTIMIZATION[vardeps] += "LTO LTOEXTRA"
+
+create_clang_plugin_symlink() {
+    if [ -d "${STAGING_BINDIR_NATIVE}" ] && [ ! -e "${STAGING_BINDIR_NATIVE}/lib" ]; then
+        ln -snf ../lib ${STAGING_BINDIR_NATIVE}/lib
+    fi
+}
+SYSROOT_PREPROCESS_FUNCS:append:toolchain-clang = " ${@bb.utils.contains_any('DISTRO_FEATURES', 'lto thin-lto', 'create_clang_plugin_symlink', '', d)}"
